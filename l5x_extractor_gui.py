@@ -47,6 +47,7 @@ class App:
         self.window.minsize(600, 300)
 
         self.filepath = tk.StringVar()
+        self.filepaths = []
         self.spreadsheet_path = tk.StringVar()
         self.results = []
         self._pending_changes = []
@@ -89,7 +90,8 @@ class App:
         messagebox.showinfo(
             "Ajuda - UpdateIpList",
             "Como usar o UpdateIpList:\n\n"
-            "1. Clique em 'Procurar L5X' e selecione um arquivo .L5X\n"
+            "1. Clique em 'Procurar L5X' e selecione um ou mais arquivos .L5X\n"
+            "   (use Ctrl+Click ou Shift+Click para selecionar múltiplos)\n"
             "2. Aguarde o processamento (barra de progresso)\n"
             "3. Os módulos com endereço IP serão listados\n"
             "4. Clique em 'Procurar Planilha' e selecione a planilha existente\n"
@@ -125,7 +127,7 @@ class App:
         frame_l5x = ttk.Frame(self.window, padding="5")
         frame_l5x.pack(fill=tk.X)
 
-        ttk.Label(frame_l5x, text="Arquivo L5X:").pack(side=tk.LEFT)
+        ttk.Label(frame_l5x, text="Arquivos L5X:").pack(side=tk.LEFT)
         entry_l5x = ttk.Entry(frame_l5x, textvariable=self.filepath)
         entry_l5x.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         ttk.Button(frame_l5x, text="Procurar L5X", command=self.browse_file).pack(side=tk.RIGHT)
@@ -143,16 +145,18 @@ class App:
         frame_tree = ttk.Frame(self.window, padding="5")
         frame_tree.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("Name", "CatalogNumber", "Address")
+        columns = ("Name", "CatalogNumber", "Address", "Component")
         self.tree = ttk.Treeview(frame_tree, columns=columns, show="headings")
 
         self.tree.heading("Name", text="Name")
         self.tree.heading("CatalogNumber", text="CatalogNumber")
         self.tree.heading("Address", text="Address")
+        self.tree.heading("Component", text="Componente")
 
-        self.tree.column("Name", width=300, minwidth=100)
-        self.tree.column("CatalogNumber", width=250, minwidth=100)
-        self.tree.column("Address", width=180, minwidth=100)
+        self.tree.column("Name", width=280, minwidth=100)
+        self.tree.column("CatalogNumber", width=200, minwidth=100)
+        self.tree.column("Address", width=150, minwidth=100)
+        self.tree.column("Component", width=150, minwidth=80)
 
         scrollbar = ttk.Scrollbar(frame_tree, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -178,6 +182,8 @@ class App:
         self.status_label = ttk.Label(frame_status, text="Nenhum arquivo carregado.")
         self.status_label.pack(side=tk.LEFT)
 
+        ttk.Button(frame_status, text="Limpar Tudo", command=self._clear_all).pack(side=tk.RIGHT, padx=(0, 5))
+        ttk.Button(frame_status, text="Salvar Lista", command=self._save_list).pack(side=tk.RIGHT, padx=(0, 5))
         ttk.Button(frame_status, text="Atualizar Planilha", command=self.update_spreadsheet).pack(side=tk.RIGHT)
 
     def update_progress(self, current, total):
@@ -188,14 +194,19 @@ class App:
             self.window.update_idletasks()
 
     def browse_file(self):
-        path = filedialog.askopenfilename(
-            title="Selecionar arquivo L5X",
+        paths = filedialog.askopenfilenames(
+            title="Selecionar arquivos L5X",
             filetypes=[("L5X Files", "*.L5X"), ("All Files", "*.*")]
         )
-        if not path:
+        if not paths:
             return
 
-        self.filepath.set(path)
+        self.filepaths = list(paths)
+        if len(paths) == 1:
+            self.filepath.set(paths[0])
+        else:
+            self.filepath.set(f"{len(paths)} arquivos selecionados")
+
         self.tree.delete(*self.tree.get_children())
         self.results.clear()
         self.progress_var.set(0)
@@ -203,23 +214,37 @@ class App:
         self.status_label.config(text="Carregando...")
         self.window.update_idletasks()
 
-        try:
-            self.results = parse_l5x(path, self.update_progress)
-        except ET.ParseError as e:
-            messagebox.showerror("Erro de XML", f"Arquivo L5X inválido ou mal formatado:\n{e}")
-            self.status_label.config(text="Erro: arquivo inválido.")
-            self.progress_label.config(text="")
-            return
-        except FileNotFoundError:
-            messagebox.showerror("Erro", "Arquivo não encontrado.")
-            self.status_label.config(text="Erro: arquivo não encontrado.")
-            self.progress_label.config(text="")
-            return
-        except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao processar arquivo:\n{e}")
-            self.status_label.config(text="Erro ao processar arquivo.")
-            self.progress_label.config(text="")
-            return
+        all_results = []
+        for path in paths:
+            try:
+                self.progress_label.config(text=f"Processando: {os.path.basename(path)}...")
+                self.window.update_idletasks()
+                results = parse_l5x(path, self.update_progress)
+                all_results.extend(results)
+            except ET.ParseError as e:
+                messagebox.showerror("Erro de XML", f"Arquivo L5X inválido ou mal formatado:\n{e}")
+                self.status_label.config(text="Erro: arquivo inválido.")
+                self.progress_label.config(text="")
+                return
+            except FileNotFoundError:
+                messagebox.showerror("Erro", "Arquivo não encontrado.")
+                self.status_label.config(text="Erro: arquivo não encontrado.")
+                self.progress_label.config(text="")
+                return
+            except Exception as e:
+                messagebox.showerror("Erro", f"Falha ao processar arquivo:\n{e}")
+                self.status_label.config(text="Erro ao processar arquivo.")
+                self.progress_label.config(text="")
+                return
+
+        seen_ips = set()
+        deduped = []
+        for name, catalog, ip in all_results:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                component = self._get_component(name.lstrip("_"))
+                deduped.append((name, catalog, ip, component))
+        self.results = deduped
 
         for row in self.results:
             self.tree.insert("", tk.END, values=row)
@@ -245,6 +270,151 @@ class App:
             return f"{int(h)}.{int(j)}.{int(l)}.{int(n)}"
         except (TypeError, ValueError):
             return None
+
+    def _get_component(self, name):
+        if re.search(r'ESW0[1-9]$', name):
+            return "Statrix 5700"
+        if re.search(r'MB0[1-3]$', name):
+            return "Armor Block"
+        if re.search(r'MB[1-9]$', name):
+            return "Armor Block"
+        if re.search(r'BM0[1-9]$', name):
+            return "Festo CPX"
+        if re.search(r'B0[1-9]$', name):
+            return "Pont I/O"
+        if re.search(r'U0[1-9]$', name):
+            return "Movidrive"
+        return ""
+
+    def _show_conflicts_dialog(self, conflicts):
+        win = tk.Toplevel(self.window)
+        win.title("Conflitos encontrados")
+        win.geometry("820x450")
+        win.minsize(640, 300)
+        win.transient(self.window)
+        win.grab_set()
+
+        header = ttk.Frame(win, padding="10")
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="Conflitos - dispositivos diferentes no mesmo IP:",
+                  font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(header, text="Escolha 'Manter' ou 'Atualizar' para cada conflito, ou use os botões abaixo para aplicar a mesma ação em todos.",
+                  wraplength=780).pack(anchor=tk.W, pady=(5, 0))
+
+        outer = ttk.Frame(win, padding="10")
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable = ttk.Frame(canvas)
+
+        scrollable.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scrollable, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        entries = []
+        for sn, ri, ip, l5x_name, sheet_val in conflicts:
+            line = ttk.Frame(scrollable, padding="4")
+            line.pack(fill=tk.X, pady=2)
+
+            info = f"IP: {ip}   |   L5X: {l5x_name}   |   Planilha: {sheet_val}"
+            ttk.Label(line, text=info, wraplength=500, anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            btn_u = tk.Button(line, text="Atualizar", width=10)
+            btn_u.pack(side=tk.RIGHT, padx=(2, 0))
+
+            btn_k = tk.Button(line, text="Manter", width=10)
+            btn_k.pack(side=tk.RIGHT, padx=(2, 0))
+
+            entry = {"sn": sn, "ri": ri, "l5x": l5x_name, "btn_k": btn_k, "btn_u": btn_u, "done": False}
+            entries.append(entry)
+
+            def resolve_keep(e=entry):
+                if e["done"]:
+                    return
+                e["done"] = True
+                e["btn_k"].config(bg="#c6efce", state="disabled", text="Mantido")
+                e["btn_u"].config(state="disabled")
+
+            def resolve_update(e=entry):
+                if e["done"]:
+                    return
+                e["done"] = True
+                self._pending_changes.append(
+                    (e["sn"], e["ri"], e["l5x"], self._get_component(e["l5x"]), "yellow")
+                )
+                e["btn_u"].config(bg="#ffe699", state="disabled", text="Atualizado")
+                e["btn_k"].config(state="disabled")
+
+            btn_k.config(command=resolve_keep)
+            btn_u.config(command=resolve_update)
+
+        def resolve_all_keep():
+            for e in entries:
+                if not e["done"]:
+                    e["done"] = True
+                    e["btn_k"].config(bg="#c6efce", state="disabled", text="Mantido")
+                    e["btn_u"].config(state="disabled")
+
+        def resolve_all_update():
+            for e in entries:
+                if not e["done"]:
+                    e["done"] = True
+                    self._pending_changes.append(
+                        (e["sn"], e["ri"], e["l5x"], self._get_component(e["l5x"]), "yellow")
+                    )
+                    e["btn_u"].config(bg="#ffe699", state="disabled", text="Atualizado")
+                    e["btn_k"].config(state="disabled")
+
+        btn_frame = ttk.Frame(win, padding="10")
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Manter Todos", command=resolve_all_keep).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Atualizar Todos", command=resolve_all_update).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Confirmar", command=win.destroy).pack(side=tk.RIGHT)
+
+        win.wait_window()
+
+    def _save_list(self):
+        if not self.results:
+            messagebox.showinfo("Aviso", "Nenhum dado para salvar. Carregue um ou mais arquivos L5X primeiro.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Salvar lista como",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Modulos com IP"
+            ws.append(["Name", "CatalogNumber", "Address", "Componente"])
+            for name, catalog, ip, component in self.results:
+                ws.append([name, catalog, ip, component])
+            wb.save(path)
+            messagebox.showinfo("Concluído", f"Lista salva com sucesso:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao salvar arquivo:\n{e}")
+
+    def _clear_all(self):
+        self.filepaths.clear()
+        self.filepath.set("")
+        self.spreadsheet_path.set("")
+        self.tree.delete(*self.tree.get_children())
+        self.results.clear()
+        self._pending_changes.clear()
+        self.progress_var.set(0)
+        self.progress_label.config(text="")
+        self.status_label.config(text="Nenhum arquivo carregado.")
 
     def update_spreadsheet(self):
         if not self.results:
@@ -280,7 +450,7 @@ class App:
 
         sheets_to_process = [s for s in wb_data.sheetnames if s.startswith("PLC")]
 
-        for name, catalog, ip in self.results:
+        for name, catalog, ip, component in self.results:
             name_clean = name.lstrip("_")
             row_found = None
             sheet_found = None
@@ -303,13 +473,13 @@ class App:
             current_val = wb_data[sheet_found].cell(row=row_found, column=5).value
 
             if current_val is None or (isinstance(current_val, str) and current_val.strip() == ""):
-                self._pending_changes.append((sheet_found, row_found, name_clean, "blue"))
+                self._pending_changes.append((sheet_found, row_found, name_clean, component, "blue"))
                 added += 1
             elif current_val == name_clean:
-                self._pending_changes.append((sheet_found, row_found, name_clean, "yellow"))
+                self._pending_changes.append((sheet_found, row_found, name_clean, component, None))
                 updated += 1
             else:
-                conflicts.append((ip, name_clean, str(current_val)))
+                conflicts.append((sheet_found, row_found, ip, name_clean, str(current_val)))
 
         if not_found:
             msg = "IPs não encontrados na planilha:\n"
@@ -318,10 +488,7 @@ class App:
             messagebox.showwarning("IPs não localizados", msg)
 
         if conflicts:
-            msg = "Conflitos - dispositivos diferentes no mesmo IP:\n\n"
-            for ip, l5x_name, sheet_name in conflicts:
-                msg += f"IP {ip}:\n  L5X: {l5x_name}\n  Planilha: {sheet_name}\n\n"
-            messagebox.showwarning("Conflitos encontrados", msg)
+            self._show_conflicts_dialog(conflicts)
 
         if not self._pending_changes:
             messagebox.showinfo("Nenhuma alteração", "Nenhuma linha precisou ser alterada.")
@@ -342,10 +509,12 @@ class App:
         blue_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
         yellow_fill = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")
 
-        for sheet_name, row_idx, value, action in self._pending_changes:
+        for sheet_name, row_idx, name_val, comp_val, action in self._pending_changes:
             ws = wb[sheet_name]
             cell = ws.cell(row=row_idx, column=5)
-            cell.value = value
+            cell.value = name_val
+            comp_cell = ws.cell(row=row_idx, column=6)
+            comp_cell.value = comp_val
             if action == "blue":
                 cell.fill = blue_fill
             elif action == "yellow":
@@ -361,7 +530,7 @@ class App:
 
         msg = f"Planilha atualizada com sucesso:\n{new_path}\n\n"
         msg += f"Novos (azul): {added}\n"
-        msg += f"Editados (amarelo): {updated}\n"
+        msg += f"Verificados: {updated}\n"
         if not_found:
             msg += f"Não encontrados: {len(not_found)}\n"
         if conflicts:
